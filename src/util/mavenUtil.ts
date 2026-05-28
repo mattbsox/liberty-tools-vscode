@@ -6,6 +6,11 @@ import { LIBERTY_MAVEN_PLUGIN_CONTAINER_VERSION, LIBERTY_MAVEN_PROJECT_CONTAINER
 import { BuildFileImpl } from "./buildFile";
 import { localize } from "../util/i18nUtil";
 import * as semver from "semver";
+import * as vscode from "vscode";
+import * as Path from "path";
+import { pathExists } from "fs-extra";
+import { exec } from "child_process";
+import { promisify } from "util";
 
 /**
  * Look for a valid parent pom.xml
@@ -49,6 +54,20 @@ export function validParentPom(xmlString: string): BuildFileImpl {
                             }
                         }
                     }
+                }
+            }
+        }
+        
+        // If no Liberty plugin found, check if this is an aggregator with modules
+        // This allows intermediate aggregators to appear in the hierarchy
+        if (!parentPom.isValidBuildFile() && result.project.modules !== undefined) {
+            const modules = result.project.modules;
+            for (let i = 0; i < modules.length; i++) {
+                const module = modules[i].module;
+                if (module !== undefined && module.length > 0) {
+                    console.debug("Found aggregator pom.xml with modules");
+                    parentPom = new BuildFileImpl(true, LIBERTY_MAVEN_PROJECT);
+                    return;
                 }
             }
         }
@@ -211,5 +230,241 @@ function containerVersion(plugin: any): boolean {
             return semver.gte(version, LIBERTY_MAVEN_PLUGIN_CONTAINER_VERSION);
         }
     }
+    return false;
+}
+
+/**
+ * Resolve effective POM using Maven help:effective-pom goal
+ * @param pomPath Path to pom.xml file
+ * @returns Effective POM XML string
+ * @throws Error if Maven command fails
+ */
+export async function resolveEffectivePom(pomPath: string): Promise<string> {
+    const execAsync = promisify(exec);
+    
+    // Determine Maven executable
+    const mavenConfig = vscode.workspace.getConfiguration("maven");
+    const mavenExecutablePath = mavenConfig.get("executable.path") as string | undefined;
+    let mvnCmd = "mvn";
+    
+    if (mavenExecutablePath) {
+        mvnCmd = mavenExecutablePath;
+    } else {
+        // Check for Maven wrapper
+        const preferMavenWrapper = mavenConfig.get("executable.preferMavenWrapper") as boolean | undefined;
+        if (preferMavenWrapper) {
+            const pomDir = Path.dirname(pomPath);
+            const mvnw = process.platform.startsWith("win") ? "mvnw.cmd" : "mvnw";
+            let currentDir = pomDir;
+            
+            // Walk up parent folders to find mvnw
+            while (Path.basename(currentDir)) {
+                const potentialMvnwPath = Path.join(currentDir, mvnw);
+                if (await pathExists(potentialMvnwPath)) {
+                    mvnCmd = potentialMvnwPath;
+                    break;
+                }
+                currentDir = Path.dirname(currentDir);
+            }
+        }
+    }
+    
+    // Build the command
+    const command = `"${mvnCmd}" help:effective-pom -f "${pomPath}" -q`;
+    
+    try {
+        // Execute the Maven command and capture stdout
+        const { stdout, stderr } = await execAsync(command, {
+            maxBuffer: 10 * 1024 * 1024, // 10MB buffer for large POMs
+            cwd: Path.dirname(pomPath)
+        });
+        
+        if (stderr && stderr.trim().length > 0) {
+            console.warn(`Maven effective-pom stderr: ${stderr}`);
+        }
+        
+        return stdout;
+    } catch (error: any) {
+        throw new Error(`Failed to resolve effective POM for ${pomPath}: ${error.message}`);
+    }
+}
+
+/**
+ * Interface for Maven project metadata used in multi-module hierarchy
+ */
+export interface MavenProjectMetadata {
+    artifactId: string;
+    parentArtifactId?: string;
+    modules: string[];
+    hasLibertyPlugin: boolean;
+    isAggregator: boolean;
+    isLibertyEnabled: boolean;
+    buildFilePath: string;
+    contextValue: string;
+    xmlString?: string;
+}
+
+/**
+ * Extract metadata from a Maven POM file for multi-module support
+ * Uses effective-pom for accurate metadata extraction with fallback to direct XML
+ * @param pomPath Path to the pom.xml file
+ * @param xmlString Optional XML string content (if already read)
+ * @returns MavenProjectMetadata object
+ */
+export async function extractMavenMetadata(pomPath: string, xmlString?: string): Promise<MavenProjectMetadata> {
+    const fse = require("fs-extra");
+    const xml = xmlString || await fse.readFile(pomPath, "utf8");
+    
+    // Try to use effective-pom for accurate metadata extraction
+    try {
+        const effectivePomXml = await resolveEffectivePom(pomPath);
+        const metadata = parsePomXml(effectivePomXml);
+        metadata.buildFilePath = pomPath;
+        metadata.xmlString = xml; // Keep original XML for reference
+        return metadata;
+    } catch (error: any) {
+        // Fallback: Use direct XML parsing if effective-pom fails
+        console.warn(`Could not resolve effective POM for ${pomPath}, using direct XML parsing: ${error.message}`);
+        const metadata = parsePomXml(xml);
+        metadata.buildFilePath = pomPath;
+        metadata.xmlString = xml;
+        return metadata;
+    }
+}
+
+/**
+ * Parse POM XML to extract metadata
+ * @param xmlString XML content of pom.xml
+ * @returns MavenProjectMetadata object
+ */
+function parsePomXml(xmlString: string): MavenProjectMetadata {
+    const parseString = require("xml2js").parseString;
+    let metadata: MavenProjectMetadata = {
+        artifactId: "",
+        modules: [],
+        hasLibertyPlugin: false,
+        isAggregator: false,
+        isLibertyEnabled: false,
+        buildFilePath: "",
+        contextValue: LIBERTY_MAVEN_PROJECT
+    };
+    
+    parseString(xmlString, (err: any, result: any) => {
+        if (err) {
+            console.error(localize("error.parsing.pom", "Error parsing the pom " + err, err));
+            return;
+        }
+        
+        // Extract artifactId
+        if (result.project.artifactId && result.project.artifactId[0] !== undefined) {
+            metadata.artifactId = result.project.artifactId[0];
+        }
+        
+        // Extract parent artifactId
+        if (result.project.parent && result.project.parent[0].artifactId) {
+            metadata.parentArtifactId = result.project.parent[0].artifactId[0];
+        }
+        
+        // Extract modules
+        if (result.project.modules) {
+            metadata.modules = extractModulesFromPom(result.project.modules);
+            if (metadata.modules.length > 0) {
+                metadata.isAggregator = true;
+            }
+        }
+        
+        // Check for packaging type "pom"
+        if (result.project.packaging && result.project.packaging[0] === "pom") {
+            metadata.isAggregator = true;
+        }
+        
+        // Check for Liberty Maven plugin
+        metadata.hasLibertyPlugin = checkForLibertyMavenPlugin(result);
+        metadata.isLibertyEnabled = metadata.hasLibertyPlugin;
+        
+        // Set context value based on plugin detection
+        if (metadata.hasLibertyPlugin) {
+            const buildFile = mavenPluginDetected(result.project.build);
+            if (buildFile.isValidBuildFile()) {
+                metadata.contextValue = buildFile.getProjectType();
+            }
+        }
+    });
+    
+    return metadata;
+}
+
+/**
+ * Extract module names from POM modules section
+ * @param modules Modules section from parsed POM
+ * @returns Array of module names
+ */
+function extractModulesFromPom(modules: any[]): string[] {
+    const moduleNames: string[] = [];
+    
+    for (let i = 0; i < modules.length; i++) {
+        const module = modules[i].module;
+        if (module !== undefined) {
+            for (let k = 0; k < module.length; k++) {
+                moduleNames.push(module[k]);
+            }
+        }
+    }
+    
+    return moduleNames;
+}
+
+/**
+ * Check if POM contains Liberty Maven plugin
+ * @param result Parsed POM object
+ * @returns true if Liberty plugin is found
+ */
+function checkForLibertyMavenPlugin(result: any): boolean {
+    // Check in build section
+    if (result.project.build !== undefined) {
+        const buildFile = mavenPluginDetected(result.project.build);
+        if (buildFile.isValidBuildFile()) {
+            return true;
+        }
+    }
+    
+    // Check in profiles
+    if (result.project.profiles !== undefined) {
+        for (let i = 0; i < result.project.profiles.length; i++) {
+            const profile = result.project.profiles[i].profile;
+            if (profile !== undefined) {
+                for (let j = 0; j < profile.length; j++) {
+                    const buildFile = mavenPluginDetected(profile[j].build);
+                    if (buildFile.isValidBuildFile()) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Check in pluginManagement
+    if (result.project.build !== undefined) {
+        for (let i = 0; i < result.project.build.length; i++) {
+            const pluginManagement = result.project.build[i].pluginManagement;
+            if (pluginManagement !== undefined) {
+                const plugins = pluginManagement[0].plugins;
+                if (plugins !== undefined) {
+                    for (let j = 0; j < plugins.length; j++) {
+                        const plugin = plugins[j].plugin;
+                        if (plugin !== undefined) {
+                            for (let k = 0; k < plugin.length; k++) {
+                                if (plugin[k].artifactId[0] === "liberty-maven-plugin" && 
+                                    plugin[k].groupId[0] === "io.openliberty.tools") {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
     return false;
 }
