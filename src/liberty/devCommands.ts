@@ -50,7 +50,7 @@ function showProjects(command: string, callback: Function, reportType?: string):
                 item.path, item);
             items.push(qpItem);
         }
-        vscode.window.showQuickPick(items).then(selection => {
+        vscode.window.showQuickPick(items, { placeHolder: localize("select.project.placeholder") }).then(selection => {
             if (!selection) {
                 return;
             }
@@ -320,25 +320,43 @@ export async function customDevModeWithHistory(libProject?: LibertyProject | und
             //no history, show input.
             await customDevMode(libProject);
         } else {
-            // show history
-            // first item is the default custom command with no params
-            const items: LibertyProjectQuickPickItem[] = [];
-            const qpItem = new LibertyProjectQuickPickItem(" ",
-                history[0].path, libProject);
-            items.push(qpItem);
+            // show a quick pick with a free-text input field and history items below
+            let placeHolderStr = "";
+            if (libProject.getContextValue() === LIBERTY_MAVEN_PROJECT || libProject.getContextValue() === LIBERTY_MAVEN_PROJECT_CONTAINER) {
+                placeHolderStr = "e.g. -DhotTests=true";
+            } else if (libProject.getContextValue() === LIBERTY_GRADLE_PROJECT || libProject.getContextValue() === LIBERTY_GRADLE_PROJECT_CONTAINER) {
+                placeHolderStr = "e.g. --hotTests";
+            }
 
+            const items: LibertyProjectQuickPickItem[] = [];
             for (let index = 0; index < history.length; index++) {
                 const item = history[index];
                 const qpItem = new LibertyProjectQuickPickItem(item.param,
                     item.path, libProject);
                 items.push(qpItem);
             }
-            vscode.window.showQuickPick(items).then(selection => {
-                if (!selection) {
-                    return;
+
+            const quickPick = vscode.window.createQuickPick<LibertyProjectQuickPickItem>();
+            quickPick.items = items;
+            quickPick.placeholder = placeHolderStr;
+            quickPick.ignoreFocusOut = true;
+            quickPick.onDidAccept(async () => {
+                // use typed value if present, otherwise fall back to the selected history item
+                const typed = quickPick.value.trim();
+                const param = typed.length > 0 ? typed : (quickPick.selectedItems[0]?.label ?? "");
+                quickPick.hide();
+
+                let terminal = libProject.getTerminal();
+                if (terminal === undefined) {
+                    terminal = createTerminalforLiberty(libProject, terminal);
                 }
-                customDevMode(selection.project, selection.label);
+                if (terminal !== undefined) {
+                    terminal.show();
+                    libProject.setTerminal(terminal);
+                    await runCustomDevMode(libProject, terminal, param);
+                }
             });
+            quickPick.show();
         }
 
     } else if (ProjectProvider.getInstance()) {
@@ -348,6 +366,26 @@ export async function customDevModeWithHistory(libProject?: LibertyProject | und
         const message = localize("cannot.custom.start.liberty.dev");
         console.error(message);
         vscode.window.showInformationMessage(message);
+    }
+}
+
+// saves the custom param to history and sends the command to the terminal
+async function runCustomDevMode(libProject: LibertyProject, terminal: vscode.Terminal, customCommand: string): Promise<void> {
+    customCommand = customCommand.trim();
+    if (customCommand.length > 0) {
+        const projectStartCmdParam: ProjectStartCmdParam = new ProjectStartCmdParam(libProject.getPath(), customCommand);
+        const projectProvider: ProjectProvider = ProjectProvider.getInstance();
+        const dashboardData: DashboardData = helperUtil.getStorageData(projectProvider.getContext());
+        dashboardData.addStartCmdParams(projectStartCmdParam);
+        await helperUtil.saveStorageData(projectProvider.getContext(), dashboardData);
+    }
+
+    if (libProject.getContextValue() === LIBERTY_MAVEN_PROJECT || libProject.getContextValue() === LIBERTY_MAVEN_PROJECT_CONTAINER) {
+        const cmd = await getCommandForMaven(libProject.getPath(), "io.openliberty.tools:liberty-maven-plugin:dev", libProject.getTerminalType(), customCommand);
+        terminal.sendText(cmd);
+    } else if (libProject.getContextValue() === LIBERTY_GRADLE_PROJECT || libProject.getContextValue() === LIBERTY_GRADLE_PROJECT_CONTAINER) {
+        const cmd = await getCommandForGradle(libProject.getPath(), "libertyDev", libProject.getTerminalType(), customCommand);
+        terminal.sendText(cmd);
     }
 }
 
@@ -393,23 +431,7 @@ export async function customDevMode(libProject?: LibertyProject | undefined, par
                 },
             ));
             if (customCommand !== undefined) {
-                // save command
-                customCommand = customCommand.trim();
-                if ( customCommand.length > 0 ) {
-                    const projectStartCmdParam: ProjectStartCmdParam = new ProjectStartCmdParam(libProject.getPath(), customCommand);
-                    const projectProvider: ProjectProvider = ProjectProvider.getInstance();
-                    const dashboardData: DashboardData = helperUtil.getStorageData(projectProvider.getContext());
-                    dashboardData.addStartCmdParams(projectStartCmdParam);
-                    await helperUtil.saveStorageData(projectProvider.getContext(), dashboardData);
-                }
-
-                if (libProject.getContextValue() === LIBERTY_MAVEN_PROJECT || libProject.getContextValue() === LIBERTY_MAVEN_PROJECT_CONTAINER) {
-                    const cmd = await getCommandForMaven(libProject.getPath(), "io.openliberty.tools:liberty-maven-plugin:dev", libProject.getTerminalType(), customCommand);
-                    terminal.sendText(cmd);
-                } else if (libProject.getContextValue() === LIBERTY_GRADLE_PROJECT || libProject.getContextValue() === LIBERTY_GRADLE_PROJECT_CONTAINER) {
-                    const cmd = await getCommandForGradle(libProject.getPath(), "libertyDev", libProject.getTerminalType(), customCommand);
-                    terminal.sendText(cmd);
-                }
+                await runCustomDevMode(libProject, terminal, customCommand);
             }
         }
     } else if (ProjectProvider.getInstance()) {
