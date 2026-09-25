@@ -1,5 +1,3 @@
-import axios from "axios";
-
 export type Options = {
     [param: string]: {
         default: string,
@@ -16,7 +14,7 @@ export type Options = {
     }
 };
 
-export async function getProjectOptions() {
-    const response = await axios.get<Options>("https://start.openliberty.io/api/start/info");
-    return response.data;
+export async function getProjectOptions(): Promise<Options> {
+    const starterParams = require("../resources/starter-params.json");
+    return starterParams as Options;
 }

@@ -1,0 +1,109 @@
+{
+  "a": {
+    "default": "app-name",
+    "name": "App Name",
+    "type": "string"
+  },
+  "b": {
+    "default": "maven",
+    "name": "Build System",
+    "options": [
+      "maven",
+      "gradle"
+    ]
+  },
+  "e": {
+    "constraints": {
+      "10.0": {
+        "m": [
+          "None",
+          "6.0",
+          "6.1",
+          "7.0",
+          "7.1"
+        ]
+      },
+      "11.0": {
+        "m": [
+          "None",
+          "7.0",
+          "7.1"
+        ]
+      },
+      "7.0": {
+        "m": [
+          "None",
+          "1.4"
+        ]
+      },
+      "8.0": {
+        "m": [
+          "None",
+          "2.2",
+          "3.3",
+          "4.1"
+        ]
+      },
+      "9.1": {
+        "m": [
+          "None",
+          "5.0"
+        ]
+      },
+      "None": {
+        "m": [
+          "1.4",
+          "2.2",
+          "3.3",
+          "4.1",
+          "5.0",
+          "6.0",
+          "6.1",
+          "7.0",
+          "7.1"
+        ]
+      }
+    },
+    "default": "11.0",
+    "name": "Java EE / Jakarta EE Version",
+    "options": [
+      "None",
+      "7.0",
+      "8.0",
+      "9.1",
+      "10.0",
+      "11.0"
+    ]
+  },
+  "g": {
+    "default": "com.demo",
+    "name": "Base Package",
+    "type": "string"
+  },
+  "j": {
+    "default": "21",
+    "name": "Java SE Version",
+    "options": [
+      "8",
+      "11",
+      "17",
+      "21"
+    ]
+  },
+  "m": {
+    "default": "7.1",
+    "name": "MicroProfile Version",
+    "options": [
+      "None",
+      "1.4",
+      "2.2",
+      "3.3",
+      "4.1",
+      "5.0",
+      "6.0",
+      "6.1",
+      "7.0",
+      "7.1"
+    ]
+  }
+}
